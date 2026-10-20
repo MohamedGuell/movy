@@ -614,6 +614,79 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Continue Watching Shelf */
+    .continue-section {
+      padding: 10px 40px 20px;
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .continue-grid {
+      display: flex;
+      gap: 14px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+    .continue-grid::-webkit-scrollbar { height: 6px; }
+    .continue-grid::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 4px; }
+    .continue-card {
+      min-width: 220px;
+      max-width: 220px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      transition: all 0.2s ease;
+      flex-shrink: 0;
+    }
+    .continue-card:hover {
+      border-color: var(--primary);
+      transform: translateY(-2px);
+    }
+    .continue-poster-wrap {
+      position: relative;
+      height: 120px;
+      background: #111;
+    }
+    .continue-poster-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .continue-badge {
+      position: absolute;
+      bottom: 6px;
+      left: 6px;
+      background: rgba(0, 0, 0, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+    .continue-info {
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .continue-title {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .continue-date {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
     /* Footer */
     footer {
       border-top: 1px solid var(--border);
@@ -688,6 +761,15 @@
       </div>
     </div>
   </div>
+
+  <!-- Continue Watching Shelf -->
+  <section class="continue-section" id="continue-section" style="display: none;">
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+      <h2 class="section-title" style="margin: 0;">⏱️ Reprendre la lecture</h2>
+      <button onclick="clearMovyHistory()" style="background:none; border:none; color:var(--text-muted); font-size:0.75rem; cursor:pointer;">Effacer</button>
+    </div>
+    <div class="continue-grid" id="continue-grid"></div>
+  </section>
 
   <!-- Main View -->
   <main>
@@ -764,7 +846,28 @@
     let searchTimeout = null;
 
     // Initialize
-    document.addEventListener('DOMContentLoaded', () => {
+    document.addEventListener('DOMContentLoaded', async () => {
+      loadContinueWatching();
+      const params = new URLSearchParams(window.location.search);
+      const targetId = params.get('id');
+      const targetType = params.get('type') || 'movie';
+      const targetSeason = parseInt(params.get('season') || '1', 10);
+      const targetEpisode = parseInt(params.get('episode') || '1', 10);
+
+      if (targetId) {
+        try {
+          const item = await tmdbFetch(`/${targetType}/${targetId}`);
+          item.media_type = targetType;
+          if (targetType === 'tv') {
+            currentSeason = targetSeason;
+            currentEpisode = targetEpisode;
+          }
+          await openMedia(item);
+        } catch (e) {
+          console.error('Error auto-launching media from URL:', e);
+        }
+      }
+
       loadTrending();
     });
 
@@ -1048,6 +1151,129 @@
       }
 
       frame.src = url;
+      recordWatchHistory(currentMedia, currentSeason, currentEpisode);
+    }
+
+    // Progression / Watch History Tracking
+    function recordWatchHistory(item, season = null, episode = null) {
+      if (!item) return;
+      const type = item.media_type === 'tv' ? 'tv' : 'movie';
+      const historyEntry = {
+        id: item.id,
+        title: item.title || item.name,
+        poster: item.poster_path ? (IMG_BASE + item.poster_path) : '',
+        type: type,
+        season: type === 'tv' ? (season || currentSeason || 1) : null,
+        episode: type === 'tv' ? (episode || currentEpisode || 1) : null,
+        date: new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }),
+        timestamp: Date.now()
+      };
+
+      // 1. Inform Hub parent window
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'HUB_RECORD_WATCH', media: 'movy', item: historyEntry }, '*');
+      }
+
+      // 2. Direct update to shared localStorage
+      try {
+        const activeUser = localStorage.getItem('hub_active_user_v1');
+        const users = JSON.parse(localStorage.getItem('hub_users_v1') || '[]');
+        if (activeUser && users.length) {
+          const user = users.find(u => u.username === activeUser);
+          if (user) {
+            if (!user.history) user.history = {};
+            if (!user.history.movy) user.history.movy = [];
+            user.history.movy = user.history.movy.filter(x => !(x.id === item.id && x.season === historyEntry.season && x.episode === historyEntry.episode));
+            user.history.movy.unshift(historyEntry);
+            user.history.movy = user.history.movy.slice(0, 30);
+            localStorage.setItem('hub_users_v1', JSON.stringify(users));
+          }
+        }
+        let localHist = JSON.parse(localStorage.getItem('movy_history_v1') || '[]');
+        localHist = localHist.filter(x => !(x.id === item.id && x.season === historyEntry.season && x.episode === historyEntry.episode));
+        localHist.unshift(historyEntry);
+        localStorage.setItem('movy_history_v1', JSON.stringify(localHist.slice(0, 30)));
+      } catch (e) {
+        console.error(e);
+      }
+      loadContinueWatching();
+    }
+
+    function loadContinueWatching() {
+      const container = document.getElementById('continue-section');
+      const grid = document.getElementById('continue-grid');
+      if (!container || !grid) return;
+
+      let history = [];
+      try {
+        const activeUser = localStorage.getItem('hub_active_user_v1');
+        const users = JSON.parse(localStorage.getItem('hub_users_v1') || '[]');
+        if (activeUser && users.length) {
+          const user = users.find(u => u.username === activeUser);
+          if (user && user.history && user.history.movy) {
+            history = user.history.movy;
+          }
+        }
+        if (history.length === 0) {
+          history = JSON.parse(localStorage.getItem('movy_history_v1') || '[]');
+        }
+      } catch (e) {}
+
+      if (!history || history.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'block';
+      grid.innerHTML = '';
+      history.slice(0, 10).forEach(h => {
+        const card = document.createElement('div');
+        card.className = 'continue-card';
+        card.innerHTML = `
+          <div class="continue-poster-wrap">
+            <img src="${h.poster || 'data:image/svg+xml,<svg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'%23333\'><rect width=\'24\' height=\'24\'/></svg>'}" alt="${escapeHtml(h.title)}">
+            <span class="continue-badge">${h.type === 'tv' ? `S${h.season}:E${h.episode}` : 'Film'}</span>
+          </div>
+          <div class="continue-info">
+            <div class="continue-title">${escapeHtml(h.title)}</div>
+            <div class="continue-date">${h.date || 'Récemment'}</div>
+          </div>
+        `;
+        card.onclick = async () => {
+          try {
+            const item = await tmdbFetch(`/${h.type}/${h.id}`);
+            item.media_type = h.type;
+            if (h.type === 'tv') {
+              currentSeason = h.season || 1;
+              currentEpisode = h.episode || 1;
+            }
+            await openMedia(item);
+          } catch (e) {
+            console.error(e);
+          }
+        };
+        grid.appendChild(card);
+      });
+    }
+
+    function clearMovyHistory() {
+      if (!confirm('Effacer votre historique de streaming ?')) return;
+      try {
+        const activeUser = localStorage.getItem('hub_active_user_v1');
+        const users = JSON.parse(localStorage.getItem('hub_users_v1') || '[]');
+        if (activeUser && users.length) {
+          const user = users.find(u => u.username === activeUser);
+          if (user && user.history) {
+            user.history.movy = [];
+            localStorage.setItem('hub_users_v1', JSON.stringify(users));
+          }
+        }
+        localStorage.removeItem('movy_history_v1');
+      } catch (e) {}
+      loadContinueWatching();
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'HUB_HISTORY_CLEARED', media: 'movy' }, '*');
+      }
     }
 
     function onServerChange() {
